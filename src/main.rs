@@ -35,6 +35,7 @@ async fn main() {
     let app = Router::new()
         .route("/", get(show_form))
         .route("/submit", post(handle_submit))
+        .route("/items", get(show_items))
         .nest_service("/static", ServeDir::new("static"));
 
     let listener = TcpListener::bind("0.0.0.0:3000")
@@ -128,7 +129,7 @@ async fn handle_submit(Form(input): Form<InputForm>) -> Html<String> {
 
     let items = fake_llm_parse(&input.text, bin_id.clone(), location.clone());
 
-     if let Err(e) = save_items_to_db(&items) {
+    if let Err(e) = save_items_to_db(&items) {
         eprintln!("Failed to save to DB: {e}");
     }
 
@@ -219,6 +220,84 @@ fn save_items_to_db(items: &[Item]) -> rusqlite::Result<()> {
 
     tx.commit()?;
     Ok(())
+}
+
+async fn show_items() -> Html<String> {
+    let items = match load_items_from_db() {
+        Ok(items) => items,
+        Err(e) => {
+            eprintln!("Failed to load items: {e}");
+            Vec::new()
+        }
+    };
+
+    let mut html = String::new();
+
+    html.push_str(
+        r#"<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Inventory</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  </head>
+  <body style="font-family: serif; padding: 1rem; max-width: 600px;">
+    <h1>Inventory</h1>
+    <ul>
+"#,
+    );
+
+    for item in items {
+        let mut line = format!("{} × {}", item.quantity, html_escape(&item.name));
+
+        if let Some(ref bin) = item.bin_id {
+            line.push_str(&format!(" — Bin: {}", html_escape(bin)));
+        }
+        if let Some(ref loc) = item.location {
+            line.push_str(&format!(" — Location: {}", html_escape(loc)));
+        }
+
+        html.push_str("<li>");
+        html.push_str(&line);
+        html.push_str("</li>");
+    }
+
+    html.push_str(
+        r#"    </ul>
+    <p><a href="/">Back to form</a></p>
+  </body>
+</html>"#,
+    );
+
+    Html(html)
+}
+
+fn load_items_from_db() -> rusqlite::Result<Vec<Item>> {
+    let conn = Connection::open("inventory.db")?;
+
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT name, quantity, bin_id, location
+        FROM items
+        ORDER BY datetime(created_at) DESC
+        "#,
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok(Item {
+            name: row.get(0)?,
+            quantity: row.get(1)?,
+            bin_id: row.get(2)?,
+            location: row.get(3)?,
+        })
+    })?;
+
+    let mut items = Vec::new();
+    for row_result in rows {
+        items.push(row_result?);
+    }
+
+    Ok(items)
 }
 
 fn html_escape(s: &str) -> String {
