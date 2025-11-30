@@ -4,13 +4,34 @@ use axum::{
     response::Html,
     routing::{get, post},
 };
+use rusqlite::{Connection, params};
 use serde::Deserialize;
-use std::{fs::OpenOptions, io::Write};
 use tokio::net::TcpListener;
 use tower_http::services::ServeDir;
 
+fn init_db() -> rusqlite::Result<()> {
+    let conn = Connection::open("inventory.db")?;
+
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS items (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            name      TEXT NOT NULL,
+            quantity  INTEGER NOT NULL,
+            bin_id    TEXT,
+            location  TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        "#,
+    )?;
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
+    init_db().expect("failed to initialize database");
+
     let app = Router::new()
         .route("/", get(show_form))
         .route("/submit", post(handle_submit))
@@ -39,7 +60,6 @@ struct InputForm {
     bin_new: Option<String>,
     location: Option<String>,
 }
-
 
 async fn show_form() -> Html<String> {
     let known_bins = known_bins();
@@ -108,8 +128,8 @@ async fn handle_submit(Form(input): Form<InputForm>) -> Html<String> {
 
     let items = fake_llm_parse(&input.text, bin_id.clone(), location.clone());
 
-    if let Err(e) = append_items_to_csv("inventory.csv", &items) {
-        eprintln!("Failed to write CSV: {e}");
+     if let Err(e) = save_items_to_db(&items) {
+        eprintln!("Failed to save to DB: {e}");
     }
 
     // Render confirmation page
@@ -177,20 +197,27 @@ fn fake_llm_parse(raw: &str, bin_id: Option<String>, location: Option<String>) -
         .collect()
 }
 
-fn append_items_to_csv(path: &str, items: &[Item]) -> std::io::Result<()> {
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+fn save_items_to_db(items: &[Item]) -> rusqlite::Result<()> {
+    let mut conn = Connection::open("inventory.db")?;
+    let tx = conn.transaction()?;
 
-    for item in items {
-        writeln!(
-            file,
-            "{},{},{},{}",
-            item.quantity,
-            item.name,
-            item.bin_id.as_deref().unwrap_or(""),
-            item.location.as_deref().unwrap_or("")
+    {
+        let mut stmt = tx.prepare(
+            "INSERT INTO items (name, quantity, bin_id, location)
+             VALUES (?1, ?2, ?3, ?4)",
         )?;
+
+        for item in items {
+            stmt.execute(params![
+                item.name,
+                item.quantity,
+                item.bin_id,
+                item.location,
+            ])?;
+        }
     }
 
+    tx.commit()?;
     Ok(())
 }
 
