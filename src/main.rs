@@ -10,7 +10,7 @@ use ollama_rs::{
     Ollama,
     generation::{completion::request::GenerationRequest, parameters::FormatType},
 };
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, Transaction, params};
 use serde::Deserialize;
 use tokio::net::TcpListener;
 use tower_http::services::ServeDir;
@@ -20,13 +20,21 @@ fn init_db() -> rusqlite::Result<()> {
 
     conn.execute_batch(
         r#"
+        PRAGMA foreign_keys = ON;
+
+        CREATE TABLE IF NOT EXISTS containers (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT NOT NULL UNIQUE,   -- globally unique label
+            kind        TEXT,                   -- 'bin', 'drawer', 'shelf', etc. optional
+            created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        );
         CREATE TABLE IF NOT EXISTS items (
-            id        INTEGER PRIMARY KEY AUTOINCREMENT,
-            name      TEXT NOT NULL,
-            quantity  INTEGER NOT NULL,
-            bin_id    TEXT,
-            location  TEXT,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            name          TEXT NOT NULL,
+            quantity      INTEGER NOT NULL,
+            container_id  INTEGER REFERENCES containers(id), -- nullable for truly loose items
+            location_hint TEXT,                              -- free-form text
+            created_at    TEXT NOT NULL DEFAULT (datetime('now'))
         );
         "#,
     )?;
@@ -53,18 +61,26 @@ async fn main() {
 }
 
 #[derive(Debug)]
+struct Container {
+    id: i64,
+    name: String,
+    kind: Option<String>,
+}
+
+#[derive(Debug)]
 struct Item {
+    id: i64,
     name: String,
     quantity: i32,
-    bin_id: Option<String>,
+    container_id: Option<i64>,
     location: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct InputForm {
     text: String,
-    bin_select: Option<String>,
-    bin_new: Option<String>,
+    container_select: Option<String>,
+    container_new: Option<String>,
     location: Option<String>,
 }
 #[derive(Debug, Deserialize)]
@@ -79,46 +95,52 @@ struct ParsedItem {
 }
 
 async fn show_form() -> Html<String> {
-    let known_bins = known_bins();
+    let container_list = match load_containers() {
+        Ok(list) => list,
+        Err(e) => {
+            eprintln!("Failed to load containers: {e}");
+            Vec::new()
+        }
+    };
 
     let mut html = String::new();
 
     html.push_str(r#"<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <title>Treasure Trove</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  </head>
-  <body style="font-family: serif; padding: 1rem; justify-self: center; max-width: 600px;">
-    <img src="/static/logo.jpg" alt="Logo" style="height: 60px; display:block; margin-bottom:1rem;">
-    <p style="font-size: 0.8rem; color: gray; font-style: italic; margin-top: -1rem; margin-bottom: 1rem; ">
-    A household ledger for tools and treasures.
-      </p>
-    <form method="post" action="/submit">
-      <label for="text">Speak or list your treasures:</label><br>
-      <textarea id="text" name="text" rows="8" cols="40" style="width: 100%;"></textarea><br><br>
-"#);
+        <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <title>Treasure Trove</title>
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          </head>
+          <body style="font-family: serif; padding: 1rem; justify-self: center; max-width: 600px;">
+            <img src="/static/logo.jpg" alt="Logo" style="height: 60px; display:block; margin-bottom:1rem;">
+            <p style="font-size: 0.8rem; color: gray; font-style: italic; margin-top: -1rem; margin-bottom: 1rem; ">
+            A household ledger for tools and treasures.
+              </p>
+            <form method="post" action="/submit">
+              <label for="text">Speak or list your treasures:</label><br>
+              <textarea id="text" name="text" rows="8" cols="40" style="width: 100%;"></textarea><br><br>
+        "#);
 
     html.push_str(
-        r#"<label for="bin_select">Select Bin (optional):</label><br>
-      <select id="bin_select" name="bin_select" style="width: 100%;">"#,
+        r#"<label for="container_select">Select Container (optional):</label><br>
+      <select id="container_select" name="container_select" style="width: 100%;">"#,
     );
 
     html.push_str(r#"<option value="">-- None --</option>"#);
-    for bin in known_bins {
-        let escaped = html_escape(bin);
+    for c in &container_list {
+        let escaped = html_escape(&c.name);
         html.push_str(&format!(
-            r#"<option value="{value}">{label}</option>"#,
-            value = escaped,
-            label = escaped
+            r#"<option value="{id}">{label}</option>"#,
+            id = c.id,
+            label = escaped,
         ));
     }
     html.push_str("</select><br><br>");
 
     html.push_str(
-        r#"<label for="bin_new">New Bin (if Other or new):</label><br>
-      <input id="bin_new" name="bin_new" type="text" style="width: 100%;" /><br><br>
+        r#"<label for="container_new">New Bin (if Other or new):</label><br>
+      <input id="container_new" name="container_new" type="text" style="width: 100%;" /><br><br>
 "#,
     );
 
@@ -139,30 +161,67 @@ async fn show_form() -> Html<String> {
 }
 
 async fn handle_submit(Form(input): Form<InputForm>) -> Html<String> {
-    // Resolve bin selection: new bin beats select; "-" and empty -> None
-    let bin_id = choose_bin(input.bin_select, input.bin_new);
-    let location = normalize_optional(input.location);
 
-    let items = match llm_parse(&input.text, bin_id.clone(), location.clone()).await {
-        Ok(items) => items,
+    let parsed_items = match llm_parse(&input.text).await {
+        Ok(p) => p,
         Err(e) => {
             eprintln!("LLM parse failed: {e}");
-            eprintln!("Storing as single raw entry");
-
-            vec![Item {
+            vec![ParsedItem {
                 name: input.text.trim().to_string(),
                 quantity: 1,
-                bin_id: bin_id.clone(),
-                location: location.clone(),
             }]
         }
     };
+    //need to convert container_select from Option<String> to Option<i64>
+      let container_select_id: Option<i64> = input
+        .container_select
+        .as_deref()                    // &str
+        .and_then(|s| {
+            let t = s.trim();
+            if t.is_empty() {
+                None                   // treat "" as None
+            } else {
+                t.parse::<i64>().ok()  // invalid numbers -> None
+            }
+        });
 
-    if let Err(e) = save_items_to_db(&items) {
-        eprintln!("Failed to save to DB: {e}");
+    let container_new = input.container_new;
+    let location = normalize_optional(input.location);
+
+
+    let mut items: Vec<Item> = Vec::new();
+
+    {
+        let mut conn = Connection::open("inventory.db").expect("failed to open DB");
+        let tx = conn.transaction().expect("failed to start transaction");
+
+        let container_id = match choose_container(&tx, container_select_id, container_new) {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("Failed to resolve container: {e}");
+                None
+            }
+        };
+
+        items = parsed_items
+            .into_iter()
+            .map(|pi| Item {
+                id: 0,
+                name: pi.name,
+                quantity: pi.quantity,
+                container_id,
+                location: location.clone(),
+            })
+            .collect();
+
+        if let Err(e) = save_items_tx(&tx, &items) {
+            eprintln!("Failed to save items: {e}");
+        }
+
+        tx.commit().expect("failed to commit transaction");
     }
 
-    // Render confirmation page
+
     let mut html = String::new();
     html.push_str(
         "<!doctype html><html><head><meta charset=\"utf-8\"><title>Inventory Saved</title>",
@@ -173,8 +232,8 @@ async fn handle_submit(Form(input): Form<InputForm>) -> Html<String> {
     for item in &items {
         let mut line = format!("{} × {}", item.quantity, html_escape(&item.name));
 
-        if let Some(ref bin) = item.bin_id {
-            line.push_str(&format!(" — Bin: {}", html_escape(bin)));
+        if let Some(container_id) = item.container_id {
+            line.push_str(&format!(" — Container ID: {}", container_id));
         }
         if let Some(ref loc) = item.location {
             line.push_str(&format!(" — Location: {}", html_escape(loc)));
@@ -192,49 +251,43 @@ async fn handle_submit(Form(input): Form<InputForm>) -> Html<String> {
     Html(html)
 }
 
-async fn llm_parse(
-    raw: &str,
-    bin_id: Option<String>,
-    location: Option<String>,
-) -> Result<Vec<Item>, Box<dyn Error + Send + Sync>> {
+async fn llm_parse(raw: &str) -> Result<Vec<ParsedItem>, Box<dyn Error + Send + Sync>> {
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("LLM Parse called");
     println!("Raw input text:\n{}", raw);
-    println!("Bin ID: {:?}", bin_id);
-    println!("Location: {:?}", location);
     let ollama = Ollama::default();
 
     let prompt = format!(
         r#"
-You parse messy inventory text into structured data.
-
-Input text will be multiple lines like:
-
-  3 boxes of nails
-  hammer
-  10 screws
-
-Rules:
-- Split the text into separate items.
-- Each item must have:
-  - quantity: integer >= 1
-  - name: short name for the object (no extra commentary)
-- If the line starts with a number, use that as quantity.
-- Otherwise, default quantity to 1.
-
-Return ONLY JSON, no explanations, exactly in this shape:
-
-{{
-  "items": [
-    {{ "name": "hammer", "quantity": 1 }},
-    {{ "name": "box of nails", "quantity": 3 }}
-  ]
-}}
-
-Now parse this input:
-
-\"\"\"{raw}\"\"\" 
-"#,
+        You parse messy inventory text into structured data.
+        
+        Input text will be multiple lines like:
+        
+          3 boxes of nails
+          hammer
+          10 screws
+        
+        Rules:
+        - Split the text into separate items.
+        - Each item must have:
+          - quantity: integer >= 1
+          - name: short name for the object (no extra commentary)
+        - If the line starts with a number, use that as quantity.
+        - Otherwise, default quantity to 1.
+        
+        Return ONLY JSON, no explanations, exactly in this shape:
+        
+        {{
+          "items": [
+            {{ "name": "hammer", "quantity": 1 }},
+            {{ "name": "box of nails", "quantity": 3 }}
+          ]
+        }}
+        
+        Now parse this input:
+        
+        \"\"\"{raw}\"\"\" 
+        "#,
     );
 
     println!("Sending prompt to Ollama:\n{}", prompt);
@@ -249,43 +302,7 @@ Now parse this input:
     println!("Raw response:\n{}", res.response);
 
     let parsed: ParsedInventory = serde_json::from_str(&res.response)?;
-
-    let items = parsed
-        .items
-        .into_iter()
-        .map(|pi| Item {
-            name: pi.name,
-            quantity: pi.quantity,
-            bin_id: bin_id.clone(),
-            location: location.clone(),
-        })
-        .collect();
-
-    Ok(items)
-}
-
-fn save_items_to_db(items: &[Item]) -> rusqlite::Result<()> {
-    let mut conn = Connection::open("inventory.db")?;
-    let tx = conn.transaction()?;
-
-    {
-        let mut stmt = tx.prepare(
-            "INSERT INTO items (name, quantity, bin_id, location)
-             VALUES (?1, ?2, ?3, ?4)",
-        )?;
-
-        for item in items {
-            stmt.execute(params![
-                item.name,
-                item.quantity,
-                item.bin_id,
-                item.location,
-            ])?;
-        }
-    }
-
-    tx.commit()?;
-    Ok(())
+    Ok(parsed.items)
 }
 
 async fn show_items() -> Html<String> {
@@ -316,8 +333,11 @@ async fn show_items() -> Html<String> {
     for item in items {
         let mut line = format!("{} × {}", item.quantity, html_escape(&item.name));
 
-        if let Some(ref bin) = item.bin_id {
-            line.push_str(&format!(" — Bin: {}", html_escape(bin)));
+        if let Some(container_id) = item.container_id {
+            line.push_str(&format!(
+                " — Bin: {}",
+                html_escape(&container_id.to_string())
+            ));
         }
         if let Some(ref loc) = item.location {
             line.push_str(&format!(" — Location: {}", html_escape(loc)));
@@ -343,7 +363,7 @@ fn load_items_from_db() -> rusqlite::Result<Vec<Item>> {
 
     let mut stmt = conn.prepare(
         r#"
-        SELECT name, quantity, bin_id, location
+        SELECT id, name, quantity, container_id, location_hint
         FROM items
         ORDER BY datetime(created_at) DESC
         "#,
@@ -351,10 +371,11 @@ fn load_items_from_db() -> rusqlite::Result<Vec<Item>> {
 
     let rows = stmt.query_map([], |row| {
         Ok(Item {
-            name: row.get(0)?,
-            quantity: row.get(1)?,
-            bin_id: row.get(2)?,
-            location: row.get(3)?,
+            id: row.get(0)?,
+            name: row.get(1)?,
+            quantity: row.get(2)?,
+            container_id: row.get(3)?,
+            location: row.get(4)?,
         })
     })?;
 
@@ -372,32 +393,68 @@ fn html_escape(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
-// Hardcoded list of known bins for now
-fn known_bins() -> &'static [&'static str] {
-    &[
-        "Spring 1",
-        "Spring 2",
-        "Autumn",
-        "Tapes & Adhesives",
-        "Wires & Cables",
-    ]
+fn load_containers() -> rusqlite::Result<Vec<Container>> {
+    let conn = Connection::open("inventory.db")?;
+    let mut stmt = conn.prepare("SELECT id, name, kind FROM containers ORDER BY name")?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok(Container {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            kind: row.get(2)?,
+        })
+    })?;
+
+    let mut containers = Vec::new();
+    for r in rows {
+        containers.push(r?);
+    }
+    Ok(containers)
 }
 
-fn choose_bin(bin_select: Option<String>, bin_new: Option<String>) -> Option<String> {
-    // If user typed a new bin, that wins
-    if let Some(new) = normalize_optional(bin_new) {
-        return Some(new);
+fn save_items_tx(tx: &rusqlite::Transaction, items: &[Item]) -> rusqlite::Result<()> {
+    let mut stmt = tx.prepare(
+        "INSERT INTO items (name, quantity, container_id, location_hint)
+         VALUES (?1, ?2, ?3, ?4)",
+    )?;
+
+    for item in items {
+        stmt.execute(params![
+            &item.name,
+            item.quantity,
+            item.container_id,
+            &item.location,
+        ])?;
     }
 
-    // Otherwise, use selected bin if it's not empty/"-"
-    if let Some(sel) = bin_select {
-        let trimmed = sel.trim();
-        if !trimmed.is_empty() && trimmed != "-" {
-            return Some(trimmed.to_string());
-        }
+    Ok(())
+}
+
+fn choose_container(
+    tx: &Transaction,
+    container_select: Option<i64>,
+    container_new: Option<String>,
+) -> rusqlite::Result<Option<i64>> {
+    // If user typed a new container, that wins
+    if let Some(new_name) = normalize_optional(container_new) {
+        // Insert if it doesn't exist
+        tx.execute(
+            "INSERT OR IGNORE INTO containers (name) VALUES (?1)",
+            params![&new_name],
+        )?;
+
+        // Fetch id for that name
+        let id: i64 = tx.query_row(
+            "SELECT id FROM containers WHERE name = ?1",
+            params![&new_name],
+            |row| row.get(0),
+        )?;
+
+        return Ok(Some(id));
     }
 
-    None
+    // Otherwise, use selected id (or None)
+    Ok(container_select)
 }
 
 // Normalize empty strings to None
