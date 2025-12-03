@@ -258,18 +258,17 @@ async fn llm_parse(raw: &str) -> Result<Vec<ParsedItem>, Box<dyn Error + Send + 
         r#"
         You parse messy inventory text into structured data.
         
-        Input text will be multiple lines like:
+        Input text will be multiple items, sometimes separated by commas or newlines but not always.        Example:
         
-          3 boxes of nails
-          hammer
-          10 screws
+          3 boxes of nails, hammer 10 screws
+          wrench
         
         Rules:
         - Split the text into separate items.
         - Each item must have:
           - quantity: integer >= 1
           - name: short name for the object (no extra commentary)
-        - If the line starts with a number, use that as quantity.
+        - If the item includes a number or mentions a vague quantity, use that as quantity.
         - Otherwise, default quantity to 1.
         
         Return ONLY JSON, no explanations, exactly in this shape:
