@@ -24,16 +24,16 @@ fn init_db() -> rusqlite::Result<()> {
 
         CREATE TABLE IF NOT EXISTS containers (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            name        TEXT NOT NULL UNIQUE,   -- globally unique label
-            kind        TEXT,                   -- 'bin', 'drawer', 'shelf', etc. optional
+            name        TEXT NOT NULL UNIQUE,   -- globally unique
+            kind        TEXT,                   -- 'bin', 'drawer', etc. 
             created_at  TEXT NOT NULL DEFAULT (datetime('now'))
         );
         CREATE TABLE IF NOT EXISTS items (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
             name          TEXT NOT NULL,
             quantity      INTEGER NOT NULL,
-            container_id  INTEGER REFERENCES containers(id), -- nullable for truly loose items
-            location_hint TEXT,                              -- free-form text
+            container_id  INTEGER REFERENCES containers(id), -- nullable for loose items
+            location_hint TEXT,                              
             created_at    TEXT NOT NULL DEFAULT (datetime('now'))
         );
         "#,
@@ -113,7 +113,10 @@ async fn show_form() -> Html<String> {
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
           </head>
           <body style="font-family: serif; padding: 1rem; justify-self: center; max-width: 600px;">
+          <div style="display:flex; justify-content:space-between; font-size:0.9rem;">
             <img src="/static/logo.jpg" alt="Logo" style="height: 60px; display:block; margin-bottom:1rem;">
+              <a href="/items" style="margin-bottom: 1rem; display: inline-block;">View Trove</a>
+              </div>
             <p style="font-size: 0.8rem; color: gray; font-style: italic; margin-top: -1rem; margin-bottom: 1rem; ">
             A household ledger for tools and treasures.
               </p>
