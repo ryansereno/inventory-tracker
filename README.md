@@ -1,8 +1,8 @@
 # Treasure Trove
 
-<img src="static/logo.jpg" alt="Treasure Trove logo" width="200" align="center" />
+<img src="static/logo.jpg" alt="Treasure Trove logo" width="200" />
 
-A household ledger for tools and treasures:
+<i>A household ledger for tools and treasures</i>
 
 - supports new or 20-year-old Zebra label printers via CUPS and ZPL
 - single-file Rust backend
