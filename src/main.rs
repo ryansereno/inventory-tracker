@@ -161,7 +161,6 @@ async fn show_form() -> Html<String> {
 }
 
 async fn handle_submit(Form(input): Form<InputForm>) -> Html<String> {
-
     let parsed_items = match llm_parse(&input.text).await {
         Ok(p) => p,
         Err(e) => {
@@ -173,21 +172,20 @@ async fn handle_submit(Form(input): Form<InputForm>) -> Html<String> {
         }
     };
     //need to convert container_select from Option<String> to Option<i64>
-      let container_select_id: Option<i64> = input
+    let container_select_id: Option<i64> = input
         .container_select
-        .as_deref()                    // &str
+        .as_deref() // &str
         .and_then(|s| {
             let t = s.trim();
             if t.is_empty() {
-                None                   // treat "" as None
+                None // treat "" as None
             } else {
-                t.parse::<i64>().ok()  // invalid numbers -> None
+                t.parse::<i64>().ok() // invalid numbers -> None
             }
         });
 
     let container_new = input.container_new;
     let location = normalize_optional(input.location);
-
 
     let mut items: Vec<Item> = Vec::new();
 
@@ -220,7 +218,6 @@ async fn handle_submit(Form(input): Form<InputForm>) -> Html<String> {
 
         tx.commit().expect("failed to commit transaction");
     }
-
 
     let mut html = String::new();
     html.push_str(
@@ -318,64 +315,116 @@ async fn show_items() -> Html<String> {
 
     html.push_str(
         r#"<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <title>Inventory</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  </head>
-  <body style="font-family: serif; padding: 1rem; max-width: 600px;">
-    <h1>Inventory</h1>
-    <ul>
-"#,
+            <html lang="en">
+              <head>
+                <meta charset="utf-8">
+                <title>Inventory</title>
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              </head>
+              <body style="font-family: serif; padding: 1rem; max-width: 400px; margin: 0 auto;">
+                <h1 style="font-size: 1.4rem; margin-bottom: 0.75rem;">Inventory</h1>
+        "#,
     );
 
-    for item in items {
-        let mut line = format!("{} × {}", item.quantity, html_escape(&item.name));
+    if items.is_empty() {
+        html.push_str("<p><em>No items yet.</em></p>\n");
+    } else {
+        let mut current_heading: Option<String> = None;
+        let mut box_open = false;
 
-        if let Some(container_id) = item.container_id {
-            line.push_str(&format!(
-                " — Bin: {}",
-                html_escape(&container_id.to_string())
-            ));
-        }
-        if let Some(ref loc) = item.location {
-            line.push_str(&format!(" — Location: {}", html_escape(loc)));
+        for row in items {
+            let heading = match &row.container_name {
+                Some(name) => format!("Container: {}", name),
+                None => "Loose items (no container)".to_string(),
+            };
+
+            if current_heading.as_deref() != Some(heading.as_str()) {
+                if box_open {
+                    html.push_str("      </tbody></table></div>\n");
+                }
+
+                html.push_str(
+                    r#"<div style="border: 1px solid black; padding: 0.5rem; margin-bottom: 0.75rem;">
+                    <div style="font-weight: bold; font-size: 0.9rem; margin-bottom: 0.25rem;">"#,
+                );
+                html.push_str(&html_escape(&heading));
+                html.push_str(
+                    r#"</div>
+                        <table style="width: 100%; border-collapse: collapse; font-size: 0.9rem;">
+                        <tbody>
+                    "#,
+                );
+
+                box_open = true;
+                current_heading = Some(heading);
+            }
+
+            let item = row.item;
+            let mut line = format!("{} × {}", item.quantity, html_escape(&item.name));
+
+            if let Some(ref loc) = item.location {
+                line.push_str(&format!(" — {}", html_escape(loc)));
+            }
+
+            html.push_str(
+                r#"      <tr>
+                    <td style="padding: 2px 4px; border-top: 1px solid #eee;">"#,
+            );
+            html.push_str(&line);
+            html.push_str("</td>\n      </tr>\n");
         }
 
-        html.push_str("<li>");
-        html.push_str(&line);
-        html.push_str("</li>");
+        if box_open {
+            html.push_str("    </tbody></table></div>\n");
+        }
     }
 
     html.push_str(
-        r#"    </ul>
-    <p><a href="/">Back to form</a></p>
-  </body>
-</html>"#,
+        r#"    <p style="margin-top: 1rem;"><a href="/">Back to form</a></p>
+            </body>
+        </html>"#,
     );
 
     Html(html)
 }
 
-fn load_items_from_db() -> rusqlite::Result<Vec<Item>> {
+#[derive(Debug)]
+struct ItemWithContainer {
+    item: Item,
+    container_name: Option<String>,
+}
+
+fn load_items_from_db() -> rusqlite::Result<Vec<ItemWithContainer>> {
     let conn = Connection::open("inventory.db")?;
 
     let mut stmt = conn.prepare(
         r#"
-        SELECT id, name, quantity, container_id, location_hint
-        FROM items
-        ORDER BY datetime(created_at) DESC
+        SELECT 
+            i.id,
+            i.name,
+            i.quantity,
+            i.container_id,
+            i.location_hint,
+            c.name
+        FROM items i
+        LEFT JOIN containers c ON i.container_id = c.id
+        ORDER BY 
+            c.name IS NULL,    -- containers first, loose items last
+            c.name ASC,
+            datetime(i.created_at) DESC
         "#,
     )?;
 
     let rows = stmt.query_map([], |row| {
-        Ok(Item {
-            id: row.get(0)?,
-            name: row.get(1)?,
-            quantity: row.get(2)?,
-            container_id: row.get(3)?,
-            location: row.get(4)?,
+        Ok(ItemWithContainer {
+            item: Item {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                quantity: row.get(2)?,
+                container_id: row.get(3)?,
+                location: row.get(4)?,
+            },
+            container_name: row.get(5)?,
         })
     })?;
 

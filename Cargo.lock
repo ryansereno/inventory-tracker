@@ -526,19 +526,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "inventory-tracker"
-version = "0.1.0"
-dependencies = [
- "axum",
- "ollama-rs",
- "rusqlite",
- "serde",
- "serde_json",
- "tokio",
- "tower-http",
-]
-
-[[package]]
 name = "ipnet"
 version = "2.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1255,6 +1242,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a04e24fab5c89c6a36eb8558c9656f30d81de51dfa4d3b45f26b21d61fa0a6c"
 dependencies = [
  "once_cell",
+]
+
+[[package]]
+name = "treasure_trove"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "ollama-rs",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower-http",
 ]
 
 [[package]]
