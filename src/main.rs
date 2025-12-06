@@ -1,4 +1,7 @@
 use std::error::Error;
+use std::fmt::Write;
+use std::io::Write as IoWrite;
+use std::process::{Command, Stdio};
 
 use axum::{
     Router,
@@ -220,6 +223,10 @@ async fn handle_submit(Form(input): Form<InputForm>) -> Html<String> {
         }
 
         tx.commit().expect("failed to commit transaction");
+    }
+
+    if let Err(e) = print_zebra_label(&items) {
+        eprintln!("Failed to print zebra label: {e}")
     }
 
     let mut html = String::new();
@@ -478,6 +485,33 @@ fn save_items_tx(tx: &rusqlite::Transaction, items: &[Item]) -> rusqlite::Result
             item.container_id,
             &item.location,
         ])?;
+    }
+
+    Ok(())
+}
+
+fn print_zebra_label(items: &[Item]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut buffer = String::new();
+    for item in items {
+        let _ = writeln!(&mut buffer, "{} x {}", item.quantity, item.name);
+    }
+
+    const PRINTER_NAME: &str = "zebra";
+
+    let mut child = Command::new("lp") //lp is the command for CUPS
+        .arg("-d")
+        .arg(PRINTER_NAME)
+        .arg("-")
+        .stdin(Stdio::piped())
+        .spawn()?;
+
+    if let Some(stdin) = &mut child.stdin {
+        stdin.write_all(buffer.as_bytes())?;
+    }
+
+    let status = child.wait()?;
+    if !status.success() {
+        eprintln!("CUPS exited with status {status}");
     }
 
     Ok(())
