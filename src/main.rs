@@ -492,16 +492,17 @@ fn save_items_tx(tx: &rusqlite::Transaction, items: &[Item]) -> rusqlite::Result
 
 fn print_zebra_label(items: &[Item]) -> Result<(), Box<dyn std::error::Error>> {
     let mut zpl_body = String::new();
-    let mut y = 20;
+    let mut y = 20; 
 
     for item in items {
         zpl_body.push_str(&format!(
-            "^FO20,{}^ADN^FD{} x {}^FS\n",
+            "^FO20,{}^FB700,3,0,L,0^ADN^FD{} x {}^FS\n",
             y,
             item.quantity,
             item.name
         ));
-        y += 22; 
+
+        y += 22 * 3;
     }
 
     let zpl = format!(
